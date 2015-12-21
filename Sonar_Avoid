@@ -1,0 +1,839 @@
+
+ Wrote by Jim Lin, Sept. 2015. All right reserved
+ */
+
+#include <PulsePosition.h>
+#include <NewPing.h>
+#include "PID_v1.h"
+//#include <EEPROM.h>
+
+double Setpoint, Input, Output=150, gap;
+double aggKp=4, aggKi=0.2, aggKd=1;
+double consKp=0.8, consKi=0.08, consKd=0.1;
+int Alarm_Distance = 50, last_time = 0, loop_interval = 0, loop_time = 0;
+
+
+//-------------------------------------------------------------------------
+// Configuration of PPM & PID
+//-------------------------------------------------------------------------
+PulsePositionOutput myPPMOut;
+PulsePositionInput myPPMIn;
+
+PID Back_PID(&Input, &Output, &Setpoint, consKp, consKi, consKd, DIRECT);
+PID Front_PID(&Input, &Output, &Setpoint, consKp, consKi, consKd, REVERSE);
+PID Left_PID(&Input, &Output, &Setpoint, consKp, consKi, consKd, DIRECT);
+PID Right_PID(&Input, &Output, &Setpoint, consKp, consKi, consKd, REVERSE);
+
+PID Yaw_PID(&Input, &Output, &Setpoint, consKp, consKi, consKd, DIRECT);
+
+PID Ceilling_PID(&Input, &Output, &Setpoint, consKp, consKi, consKd, DIRECT);
+PID Ground_PID(&Input, &Output, &Setpoint, consKp, consKi, consKd, REVERSE);
+//-------------Sonar Settings----------------------------------------
+
+
+#define SONAR_NUM		5
+
+#define Left_Sonar 		0	// 2/3 Install one pair sonar together
+#define Right_Sonar		1	// 7/8 Could not co-exist with Down_Sonar in same module
+#define Front_Sonar		2	// 11/12 Could not co-exist with Up_Sonar in same module
+#define Back_Sonar		3	// 18/19
+#define Up_Sonar 		  4	// 20/21 Could not co-exist with Front_Sonar in same module
+#define Down_Sonar    5
+#define Average_Count 5
+#define MAX_DISTANCE    300 // Maximum distance (in cm) to ping.
+#define PING_INTERVAL   40 // Milliseconds between sensor pings (29ms is about the min to avoid cross-sensor echo).
+#define SERIAL_RX_BUFFER_SIZE 256
+#define SERIAL_TX_BUFFER_SIZE 256
+#define SERIAL1_RX_BUFFER_SIZE 256
+#define SERIAL1_TX_BUFFER_SIZE 256
+#define SERIAL2_RX_BUFFER_SIZE 256
+#define SERIA2L_TX_BUFFER_SIZE 256
+
+int Safe_Distance=50;
+unsigned long pingTimer[SONAR_NUM]; // Holds the times when the next ping should happen for each sensor.
+int sensor_record_count =0;
+int Sonar[SONAR_NUM][Average_Count];
+int cm[SONAR_NUM];         // Where the ping distances are stored.
+int precm[SONAR_NUM];
+uint8_t currentSensor = 0;          // Keeps track of which sensor is active.
+
+NewPing static sonar[SONAR_NUM] = {     // Sensor object array. Each sensor's trigger pin, echo pin, and max distance to ping.
+    NewPing(11, 12, MAX_DISTANCE),   // Left
+    NewPing(22, 23, MAX_DISTANCE),   // Right
+    NewPing(2, 3, MAX_DISTANCE), // Front
+    NewPing(18, 19, MAX_DISTANCE), // Back
+    NewPing(20, 21, MAX_DISTANCE) // Up
+};
+
+#define PPM_debug false
+
+int pitch_offset, roll_offset, yaw_offset, throttle_movement;
+int state1=0, state2=0, data_expected1=0, data_expected2=0, data_received1=0, data_received2=0;
+int Fix_Height = 0, byte_count1=0, byte_count2=0;
+byte msg1[7]={0, 0, 0, 0, 0, 0, 0}, data1[24]={0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+byte msg2[7]={0, 0, 0, 0, 0, 0, 0}, data2[24]={0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+byte MSP_ATTITUDE[6]={36, 77, 60, 0, 108, 108};
+byte MSP_ALTITUDE[6]={36, 77, 60, 0, 109, 109};
+byte MSP_RC[6]={36, 77, 60, 0, 105, 105};
+byte MSP_SET_RAW_RC[22]={36, 77, 60, 16, 200, 0, 15, 0, 15, 0, 15, 0, 10, 0, 10, 0, 10, 0, 10, 0, 10, 0}; 
+byte MSP_ACC_CALIBRATION[6]={36, 77, 60, 0, 205, 205};
+byte crc1 = 0x00, crc2 = 0x00;
+bool DASS = false, RC_Update=false, Altitude_Update=false, Attitude_Update=false;
+
+int i, num=8;
+
+int Roll = 0;
+int Yaw	= 3;
+int Throttle = 2;
+int Pitch = 1;
+int Aux1 = 4;
+int Aux2 = 5;
+uint32_t Altitude=0; 
+uint16_t vario=0, angx=0, angy=0, heading=0;
+
+int CH[8]={1500,1500,1500,1000,1000,1000,1000,1000};
+int PreCH[8]={1500,1500,1500,1000,1000,1000,1000,1000};
+short PREH=0;
+
+int Alarm_Sonar = 0;
+int Alarm_Sonar1 = 0;
+int Alarm_Sonar2 = 0;
+int Alarm_Sonar3 = 0;
+
+int Fix_Front = 0;
+int Fix_Back = 0;
+int Fix_Left = 0;
+int Fix_Right = 0;
+uint16_t Fix_Heading = 0;
+
+const int trig = 2;
+const int echo = 3;
+
+int pitch_fix;
+//int pitch_distance;
+//int pitch_distance_offset;
+//short fix_heading;
+int roll_fix;
+//int roll_distance;
+//int roll_distance_offset;
+
+bool Collision = false;
+bool Taking_Off = false;
+bool takeoff_flag = false;
+bool land_flag = false;
+bool update_flag = false; 
+bool Pitch_Central = false;
+bool Roll_Central = false;
+bool Yaw_Central = false;
+
+void Front_Avoidance();
+void Back_Avoidance();
+void Front_Back_Avoidance();
+void Left_Avoidane();
+void Right_Avoidance();
+void Left_Right_Avoidance();
+void Up_Avoidance();
+void Fix_Yaw();
+void Fix_Pitch();
+void Fix_Roll();
+void Fix_Altitude();
+void PPMOut();
+void check_sonar();
+void PPMInput();
+void arm();
+void takeoff();
+void landing();
+void MSP_Link();
+void MSP_RAW_RC_OUT();
+
+void setup() {
+    
+    Serial.begin(115200);
+    Serial1.begin(115200);
+    Serial2.begin(115200);
+    
+    data1[0]=36; data1[1]=77; 
+    
+    Front_PID.SetOutputLimits(120,180);
+    Back_PID.SetOutputLimits(120,180);
+    Left_PID.SetOutputLimits(120,180);
+    Right_PID.SetOutputLimits(120,180);
+    Yaw_PID.SetOutputLimits(120,180);
+    Ceilling_PID.SetOutputLimits(110, 190);
+    Ground_PID.SetOutputLimits(105, 190);
+    //turn the PID on
+    Front_PID.SetMode(AUTOMATIC);
+    Back_PID.SetMode(AUTOMATIC);
+    Left_PID.SetMode(AUTOMATIC);
+    Right_PID.SetMode(AUTOMATIC);
+    Yaw_PID.SetMode(AUTOMATIC);
+    Ceilling_PID.SetMode(AUTOMATIC);
+    Ground_PID.SetMode(AUTOMATIC);
+    // Read PID from EEPROM
+   // consKp=((EEPROM.read(3)>>24)+(EEPROM.read(2)>>16)+(EEPROM.read(1)>>8)+EEPROM.read(0));
+   // consKi=((EEPROM.read(7)>>24)+(EEPROM.read(6)>>16)+(EEPROM.read(5)>>8)+EEPROM.read(4));
+   // consKd=((EEPROM.read(11)>>24)+(EEPROM.read(10)>>16)+(EEPROM.read(9)>>8)+EEPROM.read(8));
+   // Alarm_Distance = EEPROM.read(12);
+
+    //---------------------PPM Tx Parameter Setting-------------------------
+    myPPMOut.begin(5);  // D5 = ppm output to flight controller or next stage ppm controller
+    myPPMIn.begin(6);  // D6 = ppm input from cppm receiver or previous stage ppm controller
+ //   CH[Yaw]=1000;
+    // Acc calibration
+    //PPMOut();
+//    MSP_RAW_RC_OUT();
+//    delay(100);
+//    CH[Yaw]=1500;
+    //PPMOut();
+//    MSP_RAW_RC_OUT();
+
+    //--------------------Sonar Measurement Initial -------------------------
+    pingTimer[0] = millis() + 75;  // First ping starts at 75ms, gives time for the Arduino to chill before starting.
+    for (uint8_t i = 1; i < SONAR_NUM; i++) {  // Set the starting time for each sensor.
+        pingTimer[i] = pingTimer[i - 1] + PING_INTERVAL;
+        }
+    for (uint8_t i = 0; i < SONAR_NUM; i++) {
+      cm[i] = 0; precm[i] = 0;
+        }
+    for (int i=0; i<6; i++) {
+        Serial2.write(MSP_ACC_CALIBRATION[i]);
+      }
+   
+}
+
+  
+void loop() {
+//    loop_time = (micros()-last_time); last_time=micros();
+//    if (loop_interval< loop_time) {
+//      loop_interval=loop_time; 
+//    }
+//    Serial.print ("Loop Duration:  "); Serial.print(loop_time); Serial.println(" us     ");
+//    Serial.print("Max.:   "); Serial.print(loop_interval);Serial.println("  us  ");
+    
+    MSP_Link();
+    //---------------- Sonar Loop ------------------------------------------
+    update_flag = false;
+    for (uint8_t i = 0; i < SONAR_NUM; i++) {
+        if (millis() >= pingTimer[i]) {
+            pingTimer[i] = millis() + PING_INTERVAL * SONAR_NUM;
+            if ((i == 0) && (currentSensor == SONAR_NUM - 1)) {
+               check_sonar();
+               update_flag = true; sensor_record_count++;
+               if (Altitude_Update) {
+                  for (int k=0; k<6; k++) {
+                    Serial2.write(MSP_ALTITUDE[k]);
+                  }
+                  Altitude_Update=false;
+               }
+            }
+//              for (int k=0; k<6; k++) {
+//                Serial2.write(MSP_ATTITUDE[k]);
+//              }
+//            sonar[currentSensor].timer_stop();
+            currentSensor = i; 
+            cm[currentSensor] = 0;
+            cm[currentSensor] = sonar[currentSensor].ping_cm();
+        
+            if (sensor_record_count == Average_Count) {
+                  sensor_record_count = 0;
+            }
+            Sonar[currentSensor][sensor_record_count] = cm[currentSensor];
+            int sum=0;
+            for (int j=0; j<Average_Count; j++) {
+              sum+=Sonar[currentSensor][j];
+            }
+            cm[currentSensor]=sum/Average_Count;
+            Sonar[currentSensor][sensor_record_count] = cm[currentSensor];
+            MSP_Link();
+        }
+    }
+      
+    num = 0;
+        num = myPPMIn.available(); 
+
+    if (num>4) {
+ //     CH[]=myPPMIn.read(1); CH[Throttle]=myPPMIn.read(2); CH[Yaw]=myPPMIn.read(3);CH[Pitch]=myPPMIn.read(4);
+        for (i=1; i <= num; i++) {
+            CH[i-1] = myPPMIn.read(i);
+ //           Serial.print(i-1); Serial.print(" = "); Serial.print(CH[i-1]); Serial.print(" / ");
+        }
+ //       Serial.println();
+ //       i=CH[2]; CH[2]=CH[3]; CH[3]=i;
+    }
+
+/*
+    pitch_offset= CH[Pitch]-1500; pitch_offset=abs(pitch_offset);
+    if (pitch_offset<20) {
+      if (!Pitch_Central) {
+        Fix_Front=cm[Front_Sonar]; Fix_Back=cm[Back_Sonar]; Pitch_Central=true;
+        }
+      }
+      else {
+        Pitch_Central=false;
+      }
+    roll_offset=CH[Roll]-1500; roll_offset=abs(roll_offset);
+    if (roll_offset<20) {
+      if (!Roll_Central) {
+        Fix_Left=cm[Left_Sonar]; Fix_Right=cm[Right_Sonar]; Roll_Central=true;
+        }
+      }
+      else {
+        Roll_Central=false;
+      }
+    yaw_offset=CH[Yaw]-1500; yaw_offset=abs(yaw_offset);
+    if (yaw_offset<20) {
+      if (!Yaw_Central) {
+        Fix_Heading=heading; Yaw_Central=true;
+        }
+      }
+      else {
+        Yaw_Central=false;
+      }
+    throttle_movement=CH[Throttle]-PreCH[Throttle]; //throttle_movement=abs(throttle_movement);
+  */  
+    if ((PreCH[Aux2]<1200)&&(CH[Aux2]>1200)) {
+      for (int i=0; i<6; i++) {
+        Serial2.write(MSP_ACC_CALIBRATION[i]);
+      }
+    }
+    if (takeoff_flag) {
+      takeoff();
+      }
+    
+    //--------Input PPM Signal Modification by Priority If Necessary---------
+  
+    if((CH[Throttle]>1300)&&(CH[Aux1]>1800)) {
+        if (((cm[Front_Sonar] > 0) && (cm[Front_Sonar] < Alarm_Distance)) && ((cm[Back_Sonar] > 0) && (cm[Back_Sonar] < Alarm_Distance)))
+               {Front_Back_Avoidance();}
+             else if ((cm[Front_Sonar] > 0) && (cm[Front_Sonar] < Alarm_Distance))
+                    {Front_Avoidance();}
+                  else if ((cm[Back_Sonar] > 0) && (cm[Back_Sonar] < Alarm_Distance))
+                        {Back_Avoidance();}
+
+        if (((cm[Left_Sonar] > Alarm_Distance) || (cm[Left_Sonar] ==0)) && ((cm[Right_Sonar] > Alarm_Distance) || (cm[Right_Sonar] ==0)) && (roll_offset<20))
+            {Fix_Roll(); Fix_Yaw();}
+        else if (((cm[Left_Sonar] > 0) && (cm[Left_Sonar] < Alarm_Distance)) && ((cm[Right_Sonar] > 0) && (cm[Right_Sonar] < Alarm_Distance)))
+                {Left_Right_Avoidance();}
+             else if ((cm[Left_Sonar] > 0) && (cm[Left_Sonar] < Alarm_Distance))
+                      {Left_Avoidance();}
+                  else if ((cm[Right_Sonar] > 0) && (cm[Right_Sonar] < Alarm_Distance))
+                          {Right_Avoidance();}
+        
+        if ((cm[Up_Sonar] > 0) && (cm[Up_Sonar] < Alarm_Distance)) {Up_Avoidance();}
+     }
+     //PPMOut();
+      MSP_RAW_RC_OUT();
+}
+
+//--------------------End of Loop-----------------------------------------
+
+void check_sonar() {
+    //--------------------
+    for (uint8_t i = 0; i <= SONAR_NUM; i++) {
+        Serial.print(i);
+        Serial.print("=");
+        Serial.print(cm[i]);
+        Serial.print("cm ");
+    }
+    Serial.println();
+}
+
+void MSP_Link() {
+    while (Serial1.available()>0) {
+        byte b = Serial1.read();
+        Serial2.write(b); //Serial.print("State1 = "); Serial.print(state1); Serial.print("  /  MSG = "); Serial.println(b);
+        switch (state1) {
+                
+            case 0:               // sync char 1
+                msg1[state1]=b;
+                if (b == 36) { // $
+                    state1++; byte_count1++;
+                }
+                else {
+                    state1 = 0; byte_count1=0;
+                }
+                break;
+                
+            case 1:               // sync char 2
+                msg1[state1]=b;
+                if (b == 77) { // M
+                    state1++; byte_count1++;
+                }
+                else {            // restart and try again
+                    state1 = 0; byte_count1=0;
+                }
+                break;
+                
+            case 2:               // direction (should be >)
+                msg1[state1]=b;
+                if (b == 60) { // <
+                    state1++; byte_count1++;
+                }
+                else {state1=0; byte_count1=0;}
+                break;
+                
+            case 3:
+                msg1[state1]=b; data_expected1=b;
+                crc1=b; state1++; byte_count1++;
+                if (data_expected1>24) {state1=0; byte_count1=0;crc1=0x00;}
+                break;
+                
+            case 4:
+                msg1[state1]=b; crc1^=b; byte_count1++;
+                if (msg1[3]>0) {
+                    state1++;
+                }
+                else {state1+=2;}
+                break;
+                
+            case 5:
+                data1[data_received1]=b; crc1^=b; data_received1++; byte_count1++;
+                if(data_received1>=data_expected1) {
+                   state1++;}
+                break;
+                
+            case 6:
+                if (crc1==b) {
+                  state1=0; data_received1=0; byte_count1=0; crc1=0x00; data_expected1=0; 
+                       switch(msg1[4]) {
+                              
+                              case 97:
+                                  land_flag =  1; landing();
+                              break;
+                              case 98:
+                                  takeoff_flag = true;
+                                  Fix_Height=data1[0];
+                              break;
+                              case 99:
+                                Serial.println("DASS");
+                                  data1[5]=byte(cm[Left_Sonar]);
+                                  data1[6]=byte(cm[Right_Sonar]);
+                                  data1[7]=byte(cm[Front_Sonar]);
+                                  data1[8]=byte(cm[Back_Sonar]);
+                                  data1[9]=byte(cm[Up_Sonar]);
+                                  data1[0]=36; data1[1]=77;
+                                  data1[2]=62; data1[3]=2; data1[4]=msg1[4];
+                                  crc1=0x00;
+                                  for (int k=3; k<10; ++k) {
+                                      crc1 ^= data1[k];
+                                   }
+                                  data1[10]=crc1; 
+                                  //Serial.print("Send DASS Data: ");
+                                  for (int k=0; k<11; k++) {
+                                    Serial1.write(data1[k]); //Serial.print(data1[k]); Serial.print(",  ");
+                                  }
+                              break;
+                              default:
+                                  data_received1=0; byte_count1=0; crc1=0x00; data_expected1=0;
+                              break;
+                }
+                }
+                state1 = 0; data_received1=0; byte_count1=0;data_expected1=0; crc1=0x00;
+                break;             
+            default:
+                data_received1=0; byte_count1=0; crc1=0x00;data_expected1=0; state1=0; 
+                
+            break;
+        }
+    }
+ /*   
+    if (DASS) {
+        data1[0]=36; data1[1]=77;
+        data1[2]=62; data1[3]=2; data1[4]=msg1[4];
+        crc1=0x00;
+        for (int k=3; k<7; ++k) {
+            crc1 ^= data1[k];
+        }
+        data1[7]=crc1; 
+        //Serial.print("Send DASS Data: ");
+        for (int k=0; k<8; k++) {
+            Serial1.write(data1[k]); //Serial.print(data1[k]); Serial.print(",  ");
+        }
+        DASS=false;//Serial.println();
+    }
+    */
+    //Serial1.flush();
+    while (Serial2.available()>0) {
+        byte b = Serial2.read();
+        Serial1.write(b); 
+        //Serial.print("State2 = "); Serial.print(state2); Serial.print("  /  DATA = "); Serial.println(b);
+
+        switch (state2) {
+                
+            case 0:               // sync char 1
+                msg2[state2]=b;
+                if (b == 36) { // $
+                    state2++; byte_count2++;
+                }
+                else {
+                    state2 = 0;
+                }
+                break;
+                
+            case 1:               // sync char 2
+                msg2[state2]=b;
+                if (b == 77) { // M
+                    state2++; byte_count2++;
+                }
+                else {            // restart and try again
+                    state2 = 0; byte_count2=0;
+                }
+                break;
+                
+            case 2:               // direction (should be >)
+                msg2[state2]=b;
+                if (b == 62) { // <
+                    state2++; byte_count2++;
+                }
+                else {state2=0; byte_count2=0;}
+                break;
+                
+            case 3:
+                msg2[state2]=b; data_expected2=b;
+                crc2=b; state2++; byte_count2++;
+                if (data_expected2>24) {state2=0; byte_count2=0; crc2=0x00;}
+                break;
+                
+            case 4:
+                msg2[state2]=b; crc2^=b; byte_count2++;
+                if (msg2[3]>0) {
+                    state2++;
+                }
+                else {state2+=2;}
+                break;
+                
+            case 5:
+                data2[data_received2]=b; crc2^=b; data_received2++; byte_count2++;
+                if(data_received2>=data_expected2) {
+                   state2++;}
+                break;
+                
+            case 6:
+                if (crc2==b) {
+                  state2=0;
+                          switch (msg2[4]) {
+                              case 108:
+                                  angx=((data2[1]<<8)+data2[0])/10;
+                                  angy=((data2[3]<<8)+data2[2])/10;
+                                  heading=(data2[5]<<8)+data2[4];
+                                 
+                                  //Serial.print("angx: ");
+                                  //Serial.print(angx);
+                                  //Serial.print(" / angy: ");
+                                  //Serial.print(angy);
+                                  //Serial.print(" / heading: ");
+                                  //Serial.println(heading);
+                                 
+                                break;
+                              case 109:
+                                  Altitude=((data2[3]<<24)+(data2[2]<<16)+(data2[1]<<8)+data2[0]);
+                                  vario=(data2[5]<<8)+data2[4];
+                                  cm[Down_Sonar]=Altitude;
+                                  Altitude_Update=true;
+                                  //Serial.print("Altidue= ");
+                                  //Serial.print(Altitude);
+                                  //Serial.print(" / Vario= ");
+                                  //Serial.print(vario);
+                                  //Serial.println(" cm/s");
+                                 
+                              break;
+                              /*
+                              case 105:
+                                for (int i=0; i<8; i++) {
+                                  CH[i]=((data2[i*2+1]<<8)+data2[i*2]);
+                                  Serial.print(i); Serial.print(" = "); Serial.print(CH[i]); Serial.print(" ; ");
+                                }
+                                Serial.println();
+                                RC_Update=true;
+                               break;
+                               */
+                              default:
+                                  data_received2=0; byte_count2=0; crc2=0x00; data_expected2=0;state2=0;
+                              break;
+                              }
+                 }
+                state2 = 0; data_received2=0; byte_count2=0;data_expected2=0; crc2=0x00;
+                break;
+            default:
+                data_received2=0; byte_count2=0; crc2=0x00;data_expected2=0; state2=0; 
+                Serial2.flush();
+            break;   
+      }
+}
+ 
+}
+
+void Front_Avoidance() {
+    
+    Input=cm[Front_Sonar];Setpoint=Safe_Distance; Output=CH[Pitch]/10;
+    gap = (Setpoint-Input); gap = abs(gap);
+    if (gap < 10)
+      {Front_PID.SetTunings(consKp, consKi, consKd);}
+    else
+      {Front_PID.SetTunings(aggKp, aggKi, aggKd);}               
+    Front_PID.Compute();
+    CH[Pitch]=Output*10; MSP_SET_RAW_RC[7]= CH[1]&0xff; MSP_SET_RAW_RC[8]= (CH[1]>>8)&0xff;
+    MSP_RAW_RC_OUT();//PPMOut(); 
+    MSP_Link(); Serial.print("Front Avoidance : "); Serial.println(CH[Pitch]);
+  }
+            
+void Back_Avoidance() {
+  CH[Pitch]=PreCH[Pitch];
+  Input=cm[Back_Sonar];Setpoint=Safe_Distance; Output=CH[Pitch]/10;
+  gap = (Setpoint-Input); gap = abs(gap);
+  if (gap < 10)
+     {Back_PID.SetTunings(consKp, consKi, consKd);}
+  else
+     {Back_PID.SetTunings(aggKp, aggKi, aggKd);}               
+  Back_PID.Compute();
+  CH[Pitch]=Output*10; MSP_SET_RAW_RC[7]= CH[1]&0xff; MSP_SET_RAW_RC[8]= (CH[1]>>8)&0xff;
+  MSP_RAW_RC_OUT();//PPMOut(); 
+  MSP_Link(); Serial.print("Back Avoidance : "); Serial.println(CH[Pitch]);
+}
+
+void Front_Back_Avoidance() {
+  
+  CH[Pitch]=PreCH[Pitch];
+  Input=cm[Front_Sonar];Setpoint=(cm[Front_Sonar]+cm[Back_Sonar])/2; Output=CH[Pitch]/10;
+  gap = (Setpoint-Input); gap = abs(gap);
+  if (gap < 10)
+     {Front_PID.SetTunings(consKp, consKi, consKd);}
+  else
+     {Front_PID.SetTunings(aggKp, aggKi, aggKd);}               
+  Front_PID.Compute();
+  CH[Pitch]=Output*10; MSP_SET_RAW_RC[7]= CH[1]&0xff; MSP_SET_RAW_RC[8]= (CH[1]>>8)&0xff;
+  MSP_RAW_RC_OUT();//PPMOut(); 
+  MSP_Link();
+}
+
+void Left_Avoidance() {
+  CH[Roll]=PreCH[Roll];
+  Input=cm[Left_Sonar];Setpoint=Safe_Distance; Output=CH[Roll]/10;
+  gap = (Setpoint-Input); gap = abs(gap);
+  if (gap < 10)
+     {Left_PID.SetTunings(consKp, consKi, consKd);}
+  else
+     {Left_PID.SetTunings(aggKp, aggKi, aggKd);}               
+  Left_PID.Compute();
+  CH[Roll]=Output*10;  MSP_SET_RAW_RC[5]= CH[0]&0xff; MSP_SET_RAW_RC[6]= (CH[0]>>8)&0xff;
+  MSP_RAW_RC_OUT();//PPMOut(); 
+  MSP_Link(); Serial.print("Left Avoidance : "); Serial.println(CH[Roll]);
+}
+
+void Right_Avoidance() {
+  CH[Roll]=PreCH[Roll];
+  Input=cm[Right_Sonar];Setpoint=Safe_Distance; Output=CH[Roll]/10;
+  gap = (Setpoint-Input); gap = abs(gap);
+  if (gap < 10)
+     {Right_PID.SetTunings(consKp, consKi, consKd);}
+  else
+     {Right_PID.SetTunings(aggKp, aggKi, aggKd);}               
+  Right_PID.Compute();
+  CH[Roll]=Output*10;  MSP_SET_RAW_RC[5]= CH[0]&0xff; MSP_SET_RAW_RC[6]= (CH[0]>>8)&0xff;
+  MSP_RAW_RC_OUT();//PPMOut(); 
+  MSP_Link(); Serial.print("Right Avoidance : "); Serial.println(CH[Roll]);
+}
+
+void Left_Right_Avoidance() {
+  CH[Roll]=PreCH[Roll];
+  Input=cm[Left_Sonar];Setpoint=(cm[Left_Sonar]+cm[Right_Sonar])/2; Output=CH[Roll]/10;
+  gap = (Setpoint-Input); gap = abs(gap);
+  if (gap < 10)
+     {Left_PID.SetTunings(consKp, consKi, consKd);}
+  else
+     {Left_PID.SetTunings(aggKp, aggKi, aggKd);}               
+  Left_PID.Compute();
+  CH[Roll]=Output*10;  MSP_SET_RAW_RC[5]= CH[0]&0xff; MSP_SET_RAW_RC[6]= (CH[0]>>8)&0xff;
+  MSP_RAW_RC_OUT();//PPMOut(); 
+  MSP_Link();
+}
+                        
+void Up_Avoidance() {
+  CH[Throttle]=PreCH[Throttle];
+  Input=cm[Up_Sonar];Setpoint=Safe_Distance; Output=CH[Throttle]/10;
+  gap = (Setpoint-Input); gap = abs(gap);
+  if (gap < 10)
+     {Ceilling_PID.SetTunings(consKp, consKi, consKd);}
+  else
+     {Ceilling_PID.SetTunings(aggKp, aggKi, aggKd);}               
+  Ceilling_PID.Compute();
+  CH[Throttle]=Output*10; MSP_SET_RAW_RC[11]= CH[2]&0xff; MSP_SET_RAW_RC[12]= (CH[2]>>8)&0xff;
+  MSP_RAW_RC_OUT();//PPMOut(); 
+  MSP_Link();
+}
+//---------------------------
+void takeoff() {
+    //----------------------------
+
+     if (takeoff_flag==true) {
+        Output=CH[Throttle]/10;
+        Input=Altitude;
+        Setpoint=Fix_Height;
+        Ceilling_PID.Compute();
+        CH[Throttle]=Output*10;
+        MSP_RAW_RC_OUT();
+        //PPMOut();
+        }
+    }
+//---------------------
+void PPMOut() {
+    //----------------------
+    for (int i=1; i<=num; i++){
+//        control_movement=(CH[i-1]-PreCH[i-1]);
+//        if (abs(control_movement)>30) {
+//            CH[i-1]=PreCH[i-1];
+//        }
+        if (CH[i-1]>2000) {CH[i-1]=2000;}
+        else {if (CH[i-1]<1000) {CH[i-1]=1000;}}
+        
+        myPPMOut.write(i, CH[i-1]);
+//        if(PPM_debug){Serial.print("C"); Serial.print(i); Serial.print("="); Serial.print(CH[i-1]);}
+    }
+//    if(PPM_debug) {Serial.println();}
+    for (int i=0; i<8; i++) {
+        PreCH[i]=CH[i];}
+}
+
+void MSP_RAW_RC_OUT() {
+    for (i=0; i<8; i++) {
+      MSP_SET_RAW_RC[i*2+5]=CH[i]&0xff;
+      MSP_SET_RAW_RC[i*2+6]=(CH[i]>>8)&0xff;
+    }
+    crc2=0x00;
+    for (int i=3; i<21; i++) {
+      crc2^=MSP_SET_RAW_RC[i];
+    }
+    MSP_SET_RAW_RC[21]=crc2; crc2=0x00;
+    for (int i =0; i < 22; i++) {
+      Serial2.write(MSP_SET_RAW_RC[i]);
+    }
+    for (i=0; i<8; i++) {
+      PreCH[i]=CH[i];
+    }
+}
+
+void PPMInput() {
+    num = 0;
+    num = myPPMIn.available();
+//    if ((num<4)&&(CH[Aux2>1200])&&(CH[Throttle]>1250))
+//        {landing();}
+    if (num>4) {
+        for (i=1; i <= num; i++) {
+            CH[i-1] = myPPMIn.read(i);
+//            Serial.print("CH");Serial.print(i);Serial.print(" = "); Serial.print(CH[i-1]);
+        }
+//        Serial.println();
+    }
+}
+
+void arm() {
+    CH[Throttle]=1000; CH[Yaw]=2000; CH[Pitch]=1500; CH[Roll]=1500;
+    MSP_RAW_RC_OUT();
+    //PPMOut();
+}
+
+void landing() {
+  if (Altitude_Update) {
+    Output=CH[Down_Sonar]/10;
+    Input=Altitude;
+    Setpoint=2;
+    Ground_PID.Compute();
+    CH[Throttle]=Output*10;
+    MSP_RAW_RC_OUT();
+    //PPMOut();
+    if (CH[Throttle]<1200) {
+        CH[Throttle]=1000;
+        MSP_RAW_RC_OUT();
+    }
+  }
+}
+void Fix_Yaw() {
+  
+  Input=heading; 
+  CH[Yaw]=PreCH[Yaw];
+  Output=CH[Yaw]/10;
+  Setpoint=Fix_Heading;
+  gap = (Setpoint-Input); 
+  gap = abs(gap);
+  if (gap < 10)
+    {Yaw_PID.SetTunings(consKp, consKi, consKd);}
+  else
+    {Yaw_PID.SetTunings(aggKp, aggKi, aggKd);}
+  Yaw_PID.Compute();
+  CH[Yaw]=Output*10; MSP_RAW_RC_OUT();//PPMOut(); 
+  MSP_Link();
+}
+
+void Fix_Pitch() {
+  if (Fix_Front>0) {
+    CH[Pitch]=PreCH[Pitch];
+    Input=cm[Front_Sonar]; Output=CH[Pitch]/10; Setpoint=Fix_Front;
+    gap = (Setpoint-Input); 
+    gap = abs(gap);
+    if (gap < 10)
+      {Front_PID.SetTunings(consKp, consKi, consKd);}
+    else
+      {Front_PID.SetTunings(aggKp, aggKi, aggKd);}
+    Front_PID.Compute();
+    CH[Pitch]=Output*10; MSP_RAW_RC_OUT();//PPMOut(); 
+    MSP_Link();
+  }
+  else if (Fix_Back>0) {
+    CH[Pitch]=PreCH[Pitch];
+    Input=cm[Back_Sonar]; Output=CH[Pitch]/10; Setpoint=Fix_Back;
+    gap = (Setpoint-Input); 
+    gap = abs(gap);
+    if (gap < 10)
+      {Back_PID.SetTunings(consKp, consKi, consKd);}
+    else
+      {Back_PID.SetTunings(aggKp, aggKi, aggKd);}
+    Back_PID.Compute();
+    CH[Pitch]=Output*10; MSP_RAW_RC_OUT();//PPMOut(); 
+    MSP_Link();
+  }
+}
+
+void Fix_Roll() {
+  if (Fix_Left>0) {
+    CH[Roll]=PreCH[Roll];
+    Input=cm[Left_Sonar]; Output=CH[Roll]/10; Setpoint=Fix_Left;
+    gap = (Setpoint-Input); 
+    gap = abs(gap);
+    if (gap < 10)
+      {Left_PID.SetTunings(consKp, consKi, consKd);}
+    else
+      {Left_PID.SetTunings(aggKp, aggKi, aggKd);}
+    Left_PID.Compute();
+    CH[Roll]=Output*10; MSP_RAW_RC_OUT();//PPMOut(); 
+    MSP_Link();
+  }
+  else if (Fix_Right>0) {
+    CH[Roll]=PreCH[Roll];
+    Input=cm[Right_Sonar]; Output=CH[Roll]/10; Setpoint=Fix_Right;
+    gap = (Setpoint-Input); 
+    gap = abs(gap);
+    if (gap < 10)
+      {Right_PID.SetTunings(consKp, consKi, consKd);}
+    else
+      {Right_PID.SetTunings(aggKp, aggKi, aggKd);}
+    Right_PID.Compute();
+    CH[Roll]=Output*10; MSP_RAW_RC_OUT();//PPMOut(); 
+    MSP_Link();
+  }
+}
+
+void Fix_Altitude() {
+  CH[Throttle]=PreCH[Throttle];
+    Input=Altitude; Output=CH[Throttle]/10; Setpoint=Fix_Height;
+    gap = (Setpoint-Input); 
+    gap = abs(gap);
+    if (gap < 10)
+      {Ground_PID.SetTunings(consKp, consKi, consKd);}
+    else
+      {Ground_PID.SetTunings(aggKp, aggKi, aggKd);}
+    Ground_PID.Compute();
+    CH[Throttle]=Output*10; MSP_RAW_RC_OUT();//PPMOut(); 
+    MSP_Link();
+ }
+
+
